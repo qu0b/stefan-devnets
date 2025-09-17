@@ -1,10 +1,27 @@
+#!/usr/bin/env python3
+"""
+Ethereum Node Distribution Calculator
+
+This script calculates the distribution of validators and machines across
+different client combinations and node types (default/full/super), satisfying
+both validator and machine distribution constraints simultaneously.
+"""
+
 import numpy as np
-import math
+from typing import Dict, List, Tuple, NamedTuple
+from dataclasses import dataclass
+import warnings
+warnings.filterwarnings('ignore')
 
-total_validators = 10000
-base_validator_per_machine = 250  # Base reference
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-cl_split = {
+TOTAL_VALIDATORS = 15000
+BASE_VALIDATORS_PER_MACHINE = 255
+
+# Consensus Layer client distribution
+CL_CLIENTS = {
     'prysm': 0.25,
     'lighthouse': 0.25,
     'teku': 0.20,
@@ -13,9 +30,10 @@ cl_split = {
     'grandine': 0.10
 }
 
-el_split = {
-    'geth': 0.50,
-    'nethermind': 0.25,
+# Execution Layer client distribution
+EL_CLIENTS = {
+    'geth': 0.45,
+    'nethermind': 0.30,
     'ethereumjs': 0.01,
     'reth': 0.08,
     'besu': 0.08,
@@ -23,197 +41,314 @@ el_split = {
     'nimbusel': 0.01,
 }
 
-# Define BOTH validator and machine distributions
-validator_distribution = {
-    'default': 0.70,  # 70% of validators on default nodes
-    'full': 0.20,     # 20% of validators on full nodes
-    'super': 0.10     # 10% of validators on super nodes
+# Node type distributions
+NODE_TYPES = ['default', 'full', 'super']
+
+# Target distributions (must sum to 1.0)
+VALIDATOR_DISTRIBUTION = {
+    'default': 0.70,  # 70% of validators
+    'full': 0.20,     # 20% of validators
+    'super': 0.10     # 10% of validators
 }
 
-machine_distribution = {
-    'default': 0.50,  # 50% of machines are default nodes
-    'full': 0.25,     # 25% of machines are full nodes
-    'super': 0.25     # 25% of machines are super nodes
+MACHINE_DISTRIBUTION = {
+    'default': 0.80,  # 50% of machines
+    'full': 0.15,     # 15% of machines
+    'super': 0.05     # 05% of machines
 }
 
-# Calculate validators per machine for each node type to satisfy both constraints
-total_machines_estimate = total_validators / base_validator_per_machine
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
 
-# Calculate actual validators per machine for each type
-validators_per_machine_by_type = {}
-for node_type in validator_distribution:
-    if machine_distribution[node_type] > 0:
-        validators_per_machine_by_type[node_type] = (
-            (validator_distribution[node_type] * total_validators) /
-            (machine_distribution[node_type] * total_machines_estimate)
-        )
-    else:
-        validators_per_machine_by_type[node_type] = 0
+@dataclass
+class Allocation:
+    """Represents a single node allocation."""
+    cl_name: str
+    el_name: str
+    node_type: str
+    validators: int
+    machines: int
 
-print(f"# Configuration:")
-print(f"# Total validators: {total_validators}")
-print(f"# Validator distribution: default={validator_distribution['default']*100:.0f}%, full={validator_distribution['full']*100:.0f}%, super={validator_distribution['super']*100:.0f}%")
-print(f"# Machine distribution: default={machine_distribution['default']*100:.0f}%, full={machine_distribution['full']*100:.0f}%, super={machine_distribution['super']*100:.0f}%")
-print(f"# Validators per machine by type:")
-for node_type, vpm in validators_per_machine_by_type.items():
-    print(f"#   {node_type}: {vpm:.0f} validators/machine")
-print()
+    @property
+    def suffix(self):
+        return '' if self.node_type == 'default' else f'_{self.node_type}'
 
-# First pass: Calculate raw allocations
-pairwise_allocations = {}
-for cl_name, cl_percent in cl_split.items():
-    for el_name, el_percent in el_split.items():
-        pair_total_validators = total_validators * cl_percent * el_percent
+    @property
+    def variable_name(self):
+        return f"{self.cl_name.lower()}_{self.el_name.lower()}{self.suffix}"
 
-        for node_type in validator_distribution:
-            validators = pair_total_validators * validator_distribution[node_type]
+    @property
+    def config_name(self):
+        return f"{self.cl_name.lower()}-{self.el_name.lower()}{self.suffix.replace('_', '-')}"
 
-            # Calculate machines needed for this validator count
-            if validators_per_machine_by_type[node_type] > 0:
-                machines_needed = validators / validators_per_machine_by_type[node_type]
-            else:
-                machines_needed = 0
 
-            if node_type == 'default':
-                key = (cl_name, el_name, '')
-            else:
-                key = (cl_name, el_name, f'_{node_type}')
+# ============================================================================
+# CORE ALGORITHM
+# ============================================================================
 
-            pairwise_allocations[key] = {
-                'validators': validators,
-                'machines_raw': machines_needed,
-                'node_type': node_type
-            }
+def calculate_allocations() -> List[Allocation]:
+    """
+    Calculate optimal allocations using a cleaner approach.
+    """
+    allocations = []
+    total_machines = TOTAL_VALIDATORS / BASE_VALIDATORS_PER_MACHINE
 
-# Second pass: Round machines intelligently to maintain distribution
-# Group by node type
-by_node_type = {'default': [], 'full': [], 'super': []}
-for key, alloc in pairwise_allocations.items():
-    by_node_type[alloc['node_type']].append((key, alloc))
-
-# Round and adjust to maintain target distribution
-final_allocations = {}
-for node_type, allocations in by_node_type.items():
-    # Sort by machines_raw descending to prioritize larger allocations
-    sorted_allocs = sorted(allocations, key=lambda x: x[1]['machines_raw'], reverse=True)
-
-    # Calculate target total machines for this type
-    target_machines = round(total_machines_estimate * machine_distribution[node_type])
-
-    # First, round all allocations
-    machine_assignments = []
-    total_assigned = 0
-
-    for key, alloc in sorted_allocs:
-        if alloc['machines_raw'] >= 0.5:  # Only create a machine if at least 0.5
-            machines = max(1, round(alloc['machines_raw']))
+    # Calculate validators per machine for each type
+    validators_per_machine = {}
+    for node_type in NODE_TYPES:
+        if MACHINE_DISTRIBUTION[node_type] > 0:
+            validators_per_machine[node_type] = (
+                (VALIDATOR_DISTRIBUTION[node_type] * TOTAL_VALIDATORS) /
+                (MACHINE_DISTRIBUTION[node_type] * total_machines)
+            )
         else:
-            machines = 0
-        machine_assignments.append((key, machines))
-        total_assigned += machines
+            validators_per_machine[node_type] = 0
 
-    # Adjust to meet target (simple adjustment - could be more sophisticated)
-    diff = target_machines - total_assigned
+    # Create all allocations
+    for cl_name, cl_pct in CL_CLIENTS.items():
+        for el_name, el_pct in EL_CLIENTS.items():
+            base_validators = TOTAL_VALIDATORS * cl_pct * el_pct
+            base_machines = total_machines * cl_pct * el_pct
 
-    # If we need more machines, add to largest allocations
-    if diff > 0:
-        for i in range(min(diff, len(machine_assignments))):
-            if machine_assignments[i][1] > 0:  # Only adjust existing allocations
-                machine_assignments[i] = (machine_assignments[i][0], machine_assignments[i][1] + 1)
+            for node_type in NODE_TYPES:
+                validators = base_validators * VALIDATOR_DISTRIBUTION[node_type]
+                machines = base_machines * MACHINE_DISTRIBUTION[node_type]
 
-    # If we have too many machines, reduce from smallest non-zero allocations
-    elif diff < 0:
-        for i in range(len(machine_assignments) - 1, -1, -1):
-            if diff >= 0:
-                break
-            if machine_assignments[i][1] > 1:  # Keep at least 1 machine
-                reduction = min(machine_assignments[i][1] - 1, -diff)
-                machine_assignments[i] = (machine_assignments[i][0], machine_assignments[i][1] - reduction)
-                diff += reduction
+                allocations.append(Allocation(
+                    cl_name=cl_name,
+                    el_name=el_name,
+                    node_type=node_type,
+                    validators=validators,
+                    machines=machines
+                ))
 
-    # Store final allocations
-    for key, machines in machine_assignments:
-        orig_alloc = dict([(k, a) for k, a in sorted_allocs if k == key][0][1])
-        final_allocations[key] = {
-            'validators': orig_alloc['validators'],
-            'machines': machines,
-            'node_type': node_type
-        }
+    return allocations, validators_per_machine
 
-# Generate output
-start = 0
-output = ""
-total_machines_actual = 0
 
-# Sort by key to ensure consistent ordering
-for key in sorted(final_allocations.keys()):
-    allocation = final_allocations[key]
-    cl, el, suffix = key
+def apply_intelligent_rounding(allocations: List[Allocation], total_machines: int) -> List[Allocation]:
+    """
+    Round machine counts while preserving distribution and ensuring all validators are allocated.
+    """
+    # Group by node type
+    by_type = {'default': [], 'full': [], 'super': []}
+    for alloc in allocations:
+        by_type[alloc.node_type].append(alloc)
 
-    validators = allocation['validators']
-    machines = allocation['machines']
+    rounded_allocations = []
 
-    if machines == 0:  # Skip if no machines allocated
-        continue
+    for node_type in NODE_TYPES:
+        type_allocations = by_type[node_type]
+        target_machines = round(total_machines * MACHINE_DISTRIBUTION[node_type])
 
-    # Calculate actual validators for this allocation
-    # Distribute validators proportionally based on machine count
-    actual_validators = int(validators)
+        # Sort by machine count (descending) to prioritize larger allocations
+        type_allocations.sort(key=lambda a: a.machines, reverse=True)
 
-    if actual_validators < 1:  # Skip if less than 1 validator
-        continue
+        # Calculate total validators for this type
+        total_type_validators = sum(a.validators for a in type_allocations)
 
-    variable_name = f"{cl.lower()}_{el.lower()}{suffix}"
-    name = f"{cl.lower()}-{el.lower()}{suffix.replace('_', '-')}"
+        # For small target machines, only allocate to the top combinations
+        if target_machines <= 10:
+            # Only give machines to the top allocations
+            machine_assignments = []
+            for i, alloc in enumerate(type_allocations):
+                if i < target_machines:
+                    # Give 1 machine to each of the top allocations
+                    machine_assignments.append((alloc, 1))
+                else:
+                    # No machine for the rest
+                    machine_assignments.append((alloc, 0))
+        else:
+            # Standard rounding for larger allocations
+            machine_assignments = []
+            total_assigned = 0
 
-    total_machines_actual += machines
-    end = start + actual_validators
+            for alloc in type_allocations:
+                # Use fractional allocation
+                ideal_machines = alloc.machines
 
-    output += f'variable "{variable_name}" {{\n'
-    output += f'  default = {{\n'
-    output += f'    name            = "{name}"\n'
-    output += f'    count           = {machines}\n'
-    output += f'    validator_start = {start}\n'
-    output += f'    validator_end   = {end}\n'
-    output += f'  }}\n'
-    output += f'}}\n\n'
+                # For default nodes, be more generous with rounding
+                if node_type == 'default':
+                    if ideal_machines >= 0.4:
+                        machines = max(1, round(ideal_machines))
+                    else:
+                        machines = 0
+                else:
+                    # For full/super, be more restrictive
+                    if ideal_machines >= 0.7:
+                        machines = max(1, round(ideal_machines))
+                    else:
+                        machines = 0
 
-    start = end
+                machine_assignments.append((alloc, machines))
+                total_assigned += machines
 
-# Calculate actual distributions
-default_validators = 0
-full_validators = 0
-super_validators = 0
-default_machines = 0
-full_machines = 0
-super_machines = 0
+            # Adjust to meet target
+            diff = target_machines - total_assigned
 
-for key, allocation in final_allocations.items():
-    if allocation['machines'] > 0:
-        validators = int(allocation['validators'])
-        machines = allocation['machines']
+            if diff > 0:
+                # Need more machines - add to largest allocations first
+                for i in range(len(machine_assignments)):
+                    if diff <= 0:
+                        break
+                    alloc, machines = machine_assignments[i]
+                    if alloc.validators > 20 and machines == 0:
+                        machine_assignments[i] = (alloc, 1)
+                        diff -= 1
 
-        cl, el, suffix = key
-        if suffix == '':
-            default_validators += validators
-            default_machines += machines
-        elif suffix == '_full':
-            full_validators += validators
-            full_machines += machines
-        elif suffix == '_super':
-            super_validators += validators
-            super_machines += machines
+            elif diff < 0:
+                # Have too many machines - remove from smallest allocations
+                for i in range(len(machine_assignments) - 1, -1, -1):
+                    if diff >= 0:
+                        break
+                    alloc, machines = machine_assignments[i]
+                    if machines > 0 and alloc.validators < 50:
+                        machine_assignments[i] = (alloc, 0)
+                        diff += 1
 
-print(output)
-print(f"# Total validators allocated: {start}")
-print(f"# Total machines: {total_machines_actual}")
-print()
-print(f"# Actual distribution:")
-if start > 0:
-    print(f"# Validators: default={default_validators} ({default_validators/start*100:.1f}%), "
-          f"full={full_validators} ({full_validators/start*100:.1f}%), "
-          f"super={super_validators} ({super_validators/start*100:.1f}%)")
-if total_machines_actual > 0:
-    print(f"# Machines: default={default_machines} ({default_machines/total_machines_actual*100:.1f}%), "
-          f"full={full_machines} ({full_machines/total_machines_actual*100:.1f}%), "
-          f"super={super_machines} ({super_machines/total_machines_actual*100:.1f}%)")
+        # Create final allocations, redistributing validators from zero-machine allocations
+        orphaned_validators = 0
+        final_type_allocations = []
+
+        for alloc, machines in machine_assignments:
+            if machines > 0:
+                final_type_allocations.append(Allocation(
+                    cl_name=alloc.cl_name,
+                    el_name=alloc.el_name,
+                    node_type=alloc.node_type,
+                    validators=int(alloc.validators),
+                    machines=machines
+                ))
+            else:
+                orphaned_validators += int(alloc.validators)
+
+        # Redistribute orphaned validators proportionally
+        if orphaned_validators > 0 and final_type_allocations:
+            validators_per_allocation = orphaned_validators / len(final_type_allocations)
+            for alloc in final_type_allocations:
+                alloc.validators += int(validators_per_allocation)
+            # Handle remainder
+            remainder = orphaned_validators - int(validators_per_allocation) * len(final_type_allocations)
+            if remainder > 0:
+                final_type_allocations[0].validators += remainder
+
+        rounded_allocations.extend(final_type_allocations)
+
+    return rounded_allocations
+
+
+def generate_terraform_output(allocations: List[Allocation]) -> str:
+    """Generate Terraform variable definitions."""
+    # Sort allocations for consistent output
+    allocations.sort(key=lambda a: (a.cl_name, a.el_name, a.node_type))
+
+    output = []
+    validator_start = 0
+
+    for alloc in allocations:
+        if alloc.machines == 0 or alloc.validators < 1:
+            continue
+
+        validator_end = validator_start + alloc.validators
+
+        output.append(f'variable "{alloc.variable_name}" {{')
+        output.append(f'  default = {{')
+        output.append(f'    name            = "{alloc.config_name}"')
+        output.append(f'    count           = {alloc.machines}')
+        output.append(f'    validator_start = {validator_start}')
+        output.append(f'    validator_end   = {validator_end}')
+        output.append(f'  }}')
+        output.append(f'}}')
+        output.append('')
+
+        validator_start = validator_end
+
+    return '\n'.join(output)
+
+
+def print_analysis(allocations: List[Allocation], validators_per_machine: Dict) -> int:
+    """Print distribution analysis."""
+    # Calculate totals by type
+    by_type = {'default': [], 'full': [], 'super': []}
+    for alloc in allocations:
+        if alloc.machines > 0:
+            by_type[alloc.node_type].append(alloc)
+
+    validator_totals = {t: sum(a.validators for a in allocs) for t, allocs in by_type.items()}
+    machine_totals = {t: sum(a.machines for a in allocs) for t, allocs in by_type.items()}
+
+    total_validators = sum(validator_totals.values())
+    total_machines = sum(machine_totals.values())
+
+    print("# " + "=" * 70)
+    print("# CONFIGURATION")
+    print("# " + "=" * 70)
+    print(f"# Total validators target: {TOTAL_VALIDATORS}")
+    print(f"# Target validator distribution: ", end="")
+    print(", ".join([f"{k}={v*100:.0f}%" for k, v in VALIDATOR_DISTRIBUTION.items()]))
+    print(f"# Target machine distribution: ", end="")
+    print(", ".join([f"{k}={v*100:.0f}%" for k, v in MACHINE_DISTRIBUTION.items()]))
+    print()
+
+    print("# Validators per machine by type (theoretical):")
+    for node_type, vpm in validators_per_machine.items():
+        print(f"#   {node_type}: {vpm:.0f} validators/machine")
+    print()
+
+    print("# " + "=" * 70)
+    print("# RESULTS")
+    print("# " + "=" * 70)
+    print(f"# Total validators allocated: {total_validators}")
+    print(f"# Total machines: {total_machines}")
+    print()
+
+    if total_validators > 0:
+        print("# Actual validator distribution:")
+        for node_type in NODE_TYPES:
+            count = validator_totals.get(node_type, 0)
+            pct = count / total_validators * 100 if total_validators > 0 else 0
+            target = VALIDATOR_DISTRIBUTION[node_type] * 100
+            diff = pct - target
+            print(f"#   {node_type}: {count} ({pct:.1f}%) [target: {target:.0f}%, diff: {diff:+.1f}%]")
+
+    if total_machines > 0:
+        print()
+        print("# Actual machine distribution:")
+        for node_type in NODE_TYPES:
+            count = machine_totals.get(node_type, 0)
+            pct = count / total_machines * 100 if total_machines > 0 else 0
+            target = MACHINE_DISTRIBUTION[node_type] * 100
+            diff = pct - target
+            print(f"#   {node_type}: {count} ({pct:.1f}%) [target: {target:.0f}%, diff: {diff:+.1f}%]")
+
+    return total_validators
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    """Main execution."""
+    # Calculate initial allocations
+    allocations, validators_per_machine = calculate_allocations()
+
+    # Apply intelligent rounding
+    total_machines = TOTAL_VALIDATORS / BASE_VALIDATORS_PER_MACHINE
+    rounded_allocations = apply_intelligent_rounding(allocations, total_machines)
+
+    # Print analysis
+    total_allocated = print_analysis(rounded_allocations, validators_per_machine)
+    print()
+
+    # Generate terraform output
+    terraform_output = generate_terraform_output(rounded_allocations)
+    print(terraform_output)
+
+    # Verify we allocated all validators
+    if abs(total_allocated - TOTAL_VALIDATORS) > 10:
+        print(f"\n# WARNING: Only allocated {total_allocated} validators out of {TOTAL_VALIDATORS}")
+
+
+if __name__ == "__main__":
+    main()
