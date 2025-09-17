@@ -18,9 +18,9 @@ TOTAL_VALIDATORS = 15000
 
 # Exact number of machines for each node type
 MACHINE_COUNTS = {
-    'default': 48,
-    'full': 9,
-    'super': 3
+    'default': 32,   # Standard nodes
+    'full': 6,       # Full nodes
+    'super': 2       # Super nodes
 }
 
 # Consensus Layer client distribution (must sum to 1.0)
