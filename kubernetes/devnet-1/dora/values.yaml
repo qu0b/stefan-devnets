@@ -31,7 +31,8 @@ dora:
   executionGenesisConfig: "https://config.stefan-devnet-1.ethpandaops.io/el/genesis.json"
   apiRequireAuth: False
   apiAuthSecret: ""
-  apiWhitelistedIPs: []    apiDefaultRateLimit: 60
+  apiWhitelistedIPs: []
+  apiDefaultRateLimit: 60
   apiDisableDefaultRateLimit: false
   proxyCount: 2
   extraEnv:
