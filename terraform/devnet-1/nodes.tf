@@ -347,7 +347,7 @@ variable "lighthouse_geth_full" {
     name            = "lighthouse-geth-full"
     count           = 1
     validator_start = 100
-    validator_end   = 200
+    validator_end   = 400
   }
 }
 
