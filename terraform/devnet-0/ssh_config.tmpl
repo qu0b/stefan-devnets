@@ -12,13 +12,4 @@ Host ${host_key}
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
     LogLevel ERROR
-
 %{ endfor ~}
-
-# Wildcard entry for all ethpandaops ${ethereum_network} hosts
-Host ethpandaops-${ethereum_network}-*
-    User devops
-    Port 22
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
-    LogLevel ERROR
