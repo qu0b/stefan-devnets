@@ -196,3 +196,51 @@ resource "local_file" "ansible_inventory" {
   )
   filename = "../../../ansible/inventories/devnet-2/hetzner_inventory.ini"
 }
+
+locals {
+  ssh_config_path = pathexpand("~/.ssh/config.d/ssh_config_hetzner.${var.ethereum_network}")
+}
+
+resource "local_file" "ssh_config" {
+  content = templatefile("../ssh_config.tmpl",
+    {
+      ethereum_network = var.ethereum_network
+      hosts = merge(
+        {
+          for key, server in hcloud_server.main : "${var.ethereum_network}-${key}" => {
+            hostname = server.ipv4_address
+            name     = key
+            user     = "devops"
+          }
+        }
+      )
+    }
+  )
+  filename = local.ssh_config_path
+
+  depends_on = [hcloud_server.main]
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Ensure cleanup on destroy
+resource "null_resource" "ssh_config_cleanup" {
+  triggers = {
+    ssh_config_path = local.ssh_config_path
+  }
+
+  # This provisioner runs on destroy
+  provisioner "local-exec" {
+    when    = destroy
+    command = "rm -f ${self.triggers.ssh_config_path} || true"
+  }
+
+  depends_on = [local_file.ssh_config]
+}
+
+output "ssh_config_file" {
+  value       = "SSH config generated at: ${local.ssh_config_path}"
+  description = "Path to the generated SSH config file"
+}
